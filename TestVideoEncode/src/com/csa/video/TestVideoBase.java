@@ -53,30 +53,19 @@ public class TestVideoBase extends Activity implements Camera.PreviewCallback
 	boolean firstTime = true;
 	
     private AVFrame picture;
-    private AVCodecContext c;
-    private AVFrame coded_frame;
-    private AVOutputFormat oformat;
-    private AVStream video_st;
-    private SwsContext img_convert_ctx;
     private AVPacket pkt = new AVPacket();
-    //private PointerByReference p = new PointerByReference();
     public static final int DEFAULT_FRAME_RATE_BASE = 1001000;
 
     int i, out_size, size, x, y, output_buffer_size;
-	//FILE            *file;
     Pointer output_buffer;
     Pointer picture_buffer;
+    boolean readyToExit = false;
     
 	public TestVideoBase() throws Exception
 	{
 		avcodec.avcodec_register_all();
 		avcodec.avcodec_init();
 		avformat.av_register_all();
-
-		/* Manual Variables */
-		int             l;
-		int             fps = 30;
-		int             videoLength = 5;
 
 		/* find the H263 video encoder */
 		mCodec = avcodec.avcodec_find_encoder(avcodec.CODEC_ID_H263);
@@ -106,15 +95,6 @@ public class TestVideoBase extends Activity implements Camera.PreviewCallback
 		    Log.d("TEST_VIDEO", "avcodec_open() run fail.");
 		}
 
-//		const char* mfileName = (*env)->GetStringUTFChars(env, filename, 0);
-//
-//		file = fopen(mfileName, "wb");
-//		if (!file) {
-//		    LOGI("fopen() run fail.");
-//		}
-//
-//		(*env)->ReleaseStringUTFChars(env, filename, mfileName);
-//
 		/* alloc image and output buffer */
 		output_buffer_size = 100000;
 		output_buffer = avutil.av_malloc(output_buffer_size);
@@ -128,44 +108,6 @@ public class TestVideoBase extends Activity implements Camera.PreviewCallback
 		picture.linesize(0, mCodecCtx.width());
 		picture.linesize(1, mCodecCtx.width() / 2);
 		picture.linesize(2, mCodecCtx.width() / 2);
-
-		for(l=0;l<videoLength;l++){
-		    //encode 1 second of video
-		    for(i=0;i<fps;i++) {
-		        //prepare a dummy image YCbCr
-		        //Y
-		        for(y=0;y<mCodecCtx.height();y++) {
-		            for(x=0;x<mCodecCtx.width();x++) {
-		                picture.data(0).put((y * picture.linesize(0) + x), (byte)(x + y + i * 3));
-		            }
-		        }
-
-		        //Cb and Cr
-		        for(y=0;y<mCodecCtx.height()/2;y++) {
-		            for(x=0;x<mCodecCtx.width()/2;x++) {
-		                picture.data(1).put((y * picture.linesize(1) + x), (byte)(128 + y + i * 2));
-		                picture.data(2).put((y * picture.linesize(2) + x), (byte)(64 + x + i * 5));
-		            }
-		        }
-
-		        //encode the image
-		        out_size = avcodec.avcodec_encode_video(mCodecCtx, new BytePointer(output_buffer), output_buffer_size, picture);
-		        Log.d("TEST_VIDEO", "Encoded '" + out_size + "' bytes");
-		        //fwrite(output_buffer, 1, out_size, file);
-		    }
-
-		    //get the delayed frames
-		    for(; out_size > 0; i++) {
-		        out_size = avcodec.avcodec_encode_video(mCodecCtx, new BytePointer(output_buffer), output_buffer_size, null);
-		        Log.d("TEST_VIDEO", "Encoded '" + out_size + "' bytes");
-		        //fwrite(output_buffer, 1, out_size, file);
-		    }
-		}
-		avcodec.avcodec_close(mCodecCtx);
-		avutil.av_free(mCodecCtx);
-		avutil.av_free(picture);
-
-		return;
 	}
 
     /** Called when the activity is first created. */
@@ -182,10 +124,65 @@ public class TestVideoBase extends Activity implements Camera.PreviewCallback
 		}
     }
 
+    @Override
+    public void onBackPressed() {
+    	//Allow exit for now, later need to add better logic
+    	readyToExit = true;
+    	super.onBackPressed();
+    }
+    
+    @Override
+    public void finish() 
+    {
+    	if (readyToExit) super.finish();
+    }
+    
+	//(1)Convert byte[] first, (2) Fill picture buffer, (3) Encode, (4) Packetize
 	@Override
 	public void onPreviewFrame(byte[] data, Camera camera)
 	{
-		//convert byte[] first, then encode, then packetize
+		//(1)Convert byte[] first
+		byte[] data420 = new byte[data.length];
+		convert_yuv422_to_yuv420(data, data420, VIDEO_WIDTH, VIDEO_HEIGHT);
+
+		//(2) Fill picture buffer
+        int data1_offset = VIDEO_HEIGHT * VIDEO_WIDTH;
+        int data2_offset = data1_offset * 5 / 4;
+        int pic_linesize_0 = picture.linesize(0);
+        int pic_linesize_1 = picture.linesize(1);
+        int pic_linesize_2 = picture.linesize(2);
+        
+        //Y
+        for(y = 0; y < VIDEO_HEIGHT; y++) 
+        {
+            for(x = 0; x < VIDEO_WIDTH; x++) 
+            {
+                picture.data(0).put((y * pic_linesize_0 + x), data420[y * VIDEO_WIDTH + x]);
+            }
+        }
+
+        //Cb and Cr
+        for(y = 0; y < VIDEO_HEIGHT / 2; y++) {
+            for(x = 0; x < VIDEO_WIDTH / 2; x++) {
+                picture.data(1).put((y * pic_linesize_1 + x), data420[data1_offset + y * VIDEO_WIDTH / 2 + x]);
+                picture.data(2).put((y * pic_linesize_2 + x), data420[data2_offset + y * VIDEO_WIDTH / 2 + x]);
+            }
+        }
+
+	    //(2)Encode
+        //Encode the image into output_buffer
+        out_size = avcodec.avcodec_encode_video(mCodecCtx, new BytePointer(output_buffer), output_buffer_size, picture);
+        Log.d("TEST_VIDEO", "Encoded '" + out_size + "' bytes");
+        
+        //Delayed frames
+	    for(; out_size > 0; i++) {
+	        out_size = avcodec.avcodec_encode_video(mCodecCtx, new BytePointer(output_buffer), output_buffer_size, null);
+	        Log.d("TEST_VIDEO", "Encoded '" + out_size + "' bytes");
+	        //fwrite(output_buffer, 1, out_size, file);
+	    }
+
+		//(3) Packetize
+
 	}
 
 	void convert_yuv422_to_yuv420(byte[] inBuff, byte[] outBuff, int width, int height)
@@ -240,6 +237,5 @@ public class TestVideoBase extends Activity implements Camera.PreviewCallback
 	            outBuff[v++] = (byte) ((V + V2)/2);
 	        }
 	    }
-
 	}
 }
